@@ -7,6 +7,7 @@ final class Hub {
     private lazy var pendant = Pendant(status: status)
     private var started = false
     private var lastBeat = Date.distantPast
+    private var lastKick = Date.distantPast
 
     func start() {
         guard !started else { return }
@@ -18,6 +19,16 @@ final class Hub {
             Hub.shared.beat(force: false)
         }
         pendant.onLinkChange = { Hub.shared.beat(force: true) }
+        pendant.onAlive = {
+            // also in quiet times: tell the Mac mini that the app is alive, and try waiting uploads again
+            Hub.shared.beat(force: false)
+            DispatchQueue.main.async {
+                if Date().timeIntervalSince(Hub.shared.lastKick) > 120 {
+                    Hub.shared.lastKick = Date()
+                    Uploader.shared.kick()
+                }
+            }
+        }
         pendant.start()
         Uploader.shared.kick()
         beat(force: true)

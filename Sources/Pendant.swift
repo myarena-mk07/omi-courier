@@ -35,6 +35,7 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     var onFileReady: (() -> Void)?
     var onLinkChange: (() -> Void)?
+    var onAlive: (() -> Void)?
 
     init(status: Status) {
         self.status = status
@@ -196,6 +197,7 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             if value.count >= 16 { ring.clockValid = value[value.startIndex + 12] != 0 }
         } else if characteristic.uuid == Pendant.batteryLevel {
             if let level = value.first { status.set { $0.battery = Int(level) } }
+            onAlive?()        // the pendant sends this regularly, also when it is quiet
         } else if characteristic.uuid == Pendant.firmwareRevision {
             let text = String(data: value, encoding: .utf8) ?? ""
             status.set { $0.firmware = text }

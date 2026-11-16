@@ -25,6 +25,7 @@ final class RingDrain {
     var deviceTag = "omi"
     var clockValid = false
     private var startSeq: UInt64 = 0
+    private var endSeq: UInt64 = 0
     private var totalBytes = 0
     private var partBytes = 0
     private var part = 0
@@ -130,6 +131,7 @@ final class RingDrain {
             passive = false
         }
         startSeq = read
+        endSeq = write
         totalBytes = 0
         partBytes = 0
         part = 0
@@ -166,8 +168,11 @@ final class RingDrain {
         let status = value[value.startIndex + 1]
         let next = number(value, at: 2)
         let records = UInt64(totalBytes / recordBytes)
-        if status == 0, totalBytes % recordBytes == 0, next == startSeq + records {
-            Log.write("ring: \(records) records are in files. Release up to \(next).")
+        // Bluetooth can lose a data packet. Then the byte count is short, but the pendant sent all records up to
+        // "next". A new read would not bring the lost bytes back in a sure way, so release also in that case.
+        let clean = totalBytes % recordBytes == 0 && next == startSeq + records
+        if status == 0, clean || next == endSeq {
+            Log.write("ring: \(records) records are in files\(clean ? "" : ", some bytes were lost on the radio link"). Release up to \(next).")
             phase = .waitAdvance
             send?(Data([0x12] + bytes(next)))
         } else {
