@@ -10,4 +10,5 @@ SHA-256 checksum.
 - `Sources/Heartbeat.swift` status message to the server
 - `.github/workflows/build.yml` makes an unsigned `.ipa`. The phone signs it at install.
 
-The server address is a repository secret (`COURIER_BASE_URL`). It is not in the code.
+The server address is not in the code and not in the app file. The app gets it one time from
+`Documents/config.json` or from a pasted setup text.

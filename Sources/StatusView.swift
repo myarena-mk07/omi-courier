@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct StatusView: View {
     @EnvironmentObject var status: Status
@@ -18,12 +21,25 @@ struct StatusView: View {
                     row("Last upload", time(status.lastUpload))
                     if !status.lastError.isEmpty { row("Last fault", status.lastError) }
                 }
+                Section(header: Text("Server")) {
+                    row("Address", status.serverSet ? "set" : "not set")
+                    #if canImport(UIKit)
+                    Button("Paste the setup text") {
+                        if let text = UIPasteboard.general.string, Settings.accept(text) {
+                            status.serverSet = true
+                            Uploader.shared.kick()
+                            Hub.shared.beat(force: true)
+                        }
+                    }
+                    #endif
+                }
                 Section(header: Text("App")) {
                     row("First signature ends", time(status.signatureEnd))
                     row("Version", Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
                 }
             }
             .navigationTitle("Omi Courier")
+            .onAppear { status.serverSet = Settings.baseURL != nil }
         }
     }
 

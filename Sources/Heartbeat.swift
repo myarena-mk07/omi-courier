@@ -34,7 +34,7 @@ enum Heartbeat {
             #if canImport(UIKit)
             body["ios"] = UIDevice.current.systemVersion
             #endif
-            guard let url = URL(string: Config.baseURL + "/_status"),
+            guard let url = Settings.url("_status"),
                   let data = try? JSONSerialization.data(withJSONObject: body) else { return }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"

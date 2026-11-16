@@ -9,6 +9,9 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     static let audioCodec = CBUUID(string: "19B10002-E8F2-537E-4F6C-D104768A1214")
     static let batteryLevel = CBUUID(string: "2A19")
     static let firmwareRevision = CBUUID(string: "2A26")
+    static let timeWrite = CBUUID(string: "19B10031-E8F2-537E-4F6C-D104768A1214")
+    static let storageControl = CBUUID(string: "30295781-4301-EABD-2904-2849ADFEAE43")
+    static let storageStatus = CBUUID(string: "30295782-4301-EABD-2904-2849ADFEAE43")
 
     private let queue = DispatchQueue(label: "courier.ble")
     private let status: Status
@@ -16,6 +19,9 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var timer: DispatchSourceTimer?
+    private let ring = RingDrain()
+    private var storage: CBCharacteristic?
+    private var ringAsked = false
 
     // One audio notification is [packet number, 2 bytes little-endian][part number, 1 byte][Opus bytes].
     private var lastNumber: Int?
@@ -38,6 +44,11 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     func start() {
         guard central == nil else { return }
         writer.onClosed = { [weak self] in self?.onFileReady?() }
+        ring.onPartReady = { [weak self] in self?.onFileReady?() }
+        ring.send = { [weak self] command in
+            guard let self = self, let pendant = self.peripheral, let control = self.storage else { return }
+            pendant.writeValue(command, for: control, type: .withResponse)
+        }
         queue.sync { SegmentWriter.recoverLeftovers() }
         central = CBCentralManager(delegate: self, queue: queue, options: [
             CBCentralManagerOptionRestoreIdentifierKey: "omi-courier-central",
@@ -105,6 +116,9 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         Log.write("connected")
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: "pendant")
         writer.deviceTag = "omi" + peripheral.identifier.uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
+        ring.deviceTag = writer.deviceTag
+        storage = nil
+        ringAsked = false
         lastNumber = nil
         frameValid = false
         nextStartsRun = true
@@ -121,6 +135,8 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         Log.write("disconnected: \(error?.localizedDescription ?? "-")")
         flushFrame()
         writer.close()
+        ring.linkLost()
+        storage = nil
         nextStartsRun = true
         show("waiting for the pendant")
         central.connect(peripheral, options: nil)
@@ -137,7 +153,18 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         for item in service.characteristics ?? [] {
             if item.uuid == Pendant.audioData {
+                // Firmware 3.0.21 discards audio while a phone is connected and not subscribed. Subscribe at once.
                 peripheral.setNotifyValue(true, for: item)
+                Log.write("audio subscribed, packet room \(peripheral.maximumWriteValueLength(for: .withoutResponse) + 3)")
+            } else if item.uuid == Pendant.timeWrite {
+                // The pendant needs the time for the audio that it stores when no phone is near.
+                var seconds = UInt32(Date().timeIntervalSince1970).littleEndian
+                peripheral.writeValue(Data(bytes: &seconds, count: 4), for: item, type: .withResponse)
+            } else if item.uuid == Pendant.storageControl {
+                storage = item
+                peripheral.setNotifyValue(true, for: item)
+            } else if item.uuid == Pendant.storageStatus {
+                peripheral.readValue(for: item)
             } else if item.uuid == Pendant.batteryLevel {
                 peripheral.setNotifyValue(true, for: item)
                 peripheral.readValue(for: item)
@@ -147,10 +174,26 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        if characteristic.uuid == Pendant.storageControl, characteristic.isNotifying, !ringAsked {
+            ringAsked = true
+            queue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.ring.begin() }   // after the live audio started
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error { Log.write("write to \(characteristic.uuid.uuidString.prefix(8)) failed: \(error.localizedDescription)") }
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let value = characteristic.value else { return }
         if characteristic.uuid == Pendant.audioData {
             audio(value)
+        } else if characteristic.uuid == Pendant.storageControl {
+            ring.handle(value)
+        } else if characteristic.uuid == Pendant.storageStatus {
+            // 16 bytes, four little-endian numbers: used bytes, unread records, free bytes, clock valid
+            if value.count >= 16 { ring.clockValid = value[value.startIndex + 12] != 0 }
         } else if characteristic.uuid == Pendant.batteryLevel {
             if let level = value.first { status.set { $0.battery = Int(level) } }
         } else if characteristic.uuid == Pendant.firmwareRevision {
@@ -211,5 +254,6 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         let idle = Date().timeIntervalSince(lastPacketAt)
         if idle > 0.5 { flushFrame() }
         if idle > 3 { writer.close() }       // close the file, so that the upload can start
+        ring.tick()
     }
 }

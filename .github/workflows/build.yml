@@ -11,12 +11,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Tools
         run: brew install xcodegen
-      - name: Private config
-        env:
-          COURIER_BASE_URL: ${{ secrets.COURIER_BASE_URL }}
-        run: |
-          test -n "$COURIER_BASE_URL"
-          printf 'enum Config {\n    static let baseURL = "%s"\n}\n' "$COURIER_BASE_URL" > Sources/Config.swift
       - name: Project
         run: xcodegen generate
       - name: Build (no signature; the phone signs it)

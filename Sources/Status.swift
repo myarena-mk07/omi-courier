@@ -12,6 +12,7 @@ final class Status: ObservableObject {
     @Published var lastUpload: Date?
     @Published var lastError = ""
     @Published var signatureEnd: Date? = Signature.firstEnd()
+    @Published var serverSet = Settings.baseURL != nil
 
     /// Change values from any thread.
     func set(_ change: @escaping (Status) -> Void) {

@@ -25,7 +25,8 @@ final class Uploader: NSObject, URLSessionDataDelegate {
 
     static func outboxFiles() -> [URL] {
         let list = (try? FileManager.default.contentsOfDirectory(at: Paths.outbox, includingPropertiesForKeys: nil)) ?? []
-        return list.filter { $0.pathExtension == "bin" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        return list.filter { $0.pathExtension == "bin" || $0.pathExtension == "ringraw" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     /// Starts an upload for each waiting file that is not in work.
@@ -44,8 +45,8 @@ final class Uploader: NSObject, URLSessionDataDelegate {
                 let wait = self.notBefore[name]
                 self.lock.unlock()
                 if let wait = wait, wait > now { continue }
-                guard let data = try? Data(contentsOf: file), !data.isEmpty,
-                      let url = URL(string: Config.baseURL + "/" + name) else { continue }
+                guard let url = Settings.url(name) else { break }       // no server address yet: the files wait
+                guard let data = try? Data(contentsOf: file), !data.isEmpty else { continue }
                 var request = URLRequest(url: url)
                 request.httpMethod = "PUT"
                 request.setValue(Uploader.hex(SHA256.hash(data: data)), forHTTPHeaderField: "X-Sha256")

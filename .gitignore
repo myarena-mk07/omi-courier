@@ -1,4 +1,3 @@
-Sources/Config.swift
 *.xcodeproj
 Info.plist
 build/
