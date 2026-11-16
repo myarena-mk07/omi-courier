@@ -19,6 +19,7 @@ final class Hub {
             Hub.shared.beat(force: false)
         }
         pendant.onLinkChange = { Hub.shared.beat(force: true) }
+        pendant.onQuestion = { file in Uploader.shared.sendNow(file) }
         pendant.onAlive = {
             // also in quiet times: tell the Mac mini that the app is alive, and try waiting uploads again
             Hub.shared.beat(force: false)

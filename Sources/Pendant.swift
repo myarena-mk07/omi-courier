@@ -12,6 +12,8 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     static let timeWrite = CBUUID(string: "19B10031-E8F2-537E-4F6C-D104768A1214")
     static let storageControl = CBUUID(string: "30295781-4301-EABD-2904-2849ADFEAE43")
     static let storageStatus = CBUUID(string: "30295782-4301-EABD-2904-2849ADFEAE43")
+    static let button = CBUUID(string: "23BA7925-0000-1000-7450-346EAC492E92")
+    static let haptic = CBUUID(string: "CAB1AB96-2EA5-4F4D-BB56-874B72CFC984")
 
     private let queue = DispatchQueue(label: "courier.ble")
     private let status: Status
@@ -36,6 +38,14 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     var onFileReady: (() -> Void)?
     var onLinkChange: (() -> Void)?
     var onAlive: (() -> Void)?
+    var onQuestion: ((URL) -> Void)?
+
+    // A question for the assistant: double tap on the pendant starts it, one tap ends it (20 s at most).
+    // Do not hold the button: the firmware switches the pendant off after 3 seconds.
+    private var hapticItem: CBCharacteristic?
+    private var askFrames: [Data] = []
+    private var askStart: Date?
+    private let askMaxSeconds: TimeInterval = 20
 
     init(status: Status) {
         self.status = status
@@ -134,6 +144,7 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         Log.write("disconnected: \(error?.localizedDescription ?? "-")")
+        if askStart != nil { endQuestion() }
         flushFrame()
         writer.close()
         ring.linkLost()
@@ -166,6 +177,10 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                 peripheral.setNotifyValue(true, for: item)
             } else if item.uuid == Pendant.storageStatus {
                 peripheral.readValue(for: item)
+            } else if item.uuid == Pendant.button {
+                peripheral.setNotifyValue(true, for: item)
+            } else if item.uuid == Pendant.haptic {
+                hapticItem = item
             } else if item.uuid == Pendant.batteryLevel {
                 peripheral.setNotifyValue(true, for: item)
                 peripheral.readValue(for: item)
@@ -192,6 +207,11 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             audio(value)
         } else if characteristic.uuid == Pendant.storageControl {
             ring.handle(value)
+        } else if characteristic.uuid == Pendant.button {
+            // 8 bytes; the first number is the event: 1 tap, 2 double tap, 3 long, 4 press, 5 release
+            if let event = value.first {
+                if event == 2 { startQuestion() } else if event == 1, askStart != nil { endQuestion() }
+            }
         } else if characteristic.uuid == Pendant.storageStatus {
             // 16 bytes, four little-endian numbers: used bytes, unread records, free bytes, clock valid
             if value.count >= 16 { ring.clockValid = value[value.startIndex + 12] != 0 }
@@ -244,6 +264,7 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
         writer.append(frame, at: frameAt, newRun: frameStartsRun)
+        if askStart != nil { askFrames.append(frame) }
         frameValid = false
         if frameAt.timeIntervalSince(lastShown) > 5 {
             lastShown = frameAt
@@ -252,10 +273,51 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
+    private func buzz() {
+        guard let pendant = peripheral, let item = hapticItem else { return }
+        pendant.writeValue(Data([1]), for: item, type: .withResponse)      // 100 ms
+    }
+
+    private func startQuestion() {
+        askFrames = []
+        askStart = Date()
+        buzz()
+        Log.write("question: start")
+    }
+
+    private func endQuestion() {
+        guard let start = askStart else { return }
+        askStart = nil
+        flushFrame()
+        let frames = askFrames
+        askFrames = []
+        guard frames.count > 25 else {                 // less than half a second: ignore
+            Log.write("question: too short")
+            return
+        }
+        var body = Data()
+        for frame in frames {
+            var length = UInt32(frame.count).littleEndian
+            body.append(Data(bytes: &length, count: 4))
+            body.append(frame)
+        }
+        let name = String(format: "ask_%@_%.3f.bin", writer.deviceTag, start.timeIntervalSince1970)
+        let file = Paths.recording.appendingPathComponent(name)
+        do {
+            try body.write(to: file)
+            Log.write("question: \(frames.count / 50) s")
+            buzz()
+            onQuestion?(file)
+        } catch {
+            Log.write("question: cannot write the clip")
+        }
+    }
+
     private func idleCheck() {
         let idle = Date().timeIntervalSince(lastPacketAt)
         if idle > 0.5 { flushFrame() }
         if idle > 3 { writer.close() }       // close the file, so that the upload can start
+        if let start = askStart, Date().timeIntervalSince(start) > askMaxSeconds { endQuestion() }
         ring.tick()
     }
 }

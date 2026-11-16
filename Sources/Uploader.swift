@@ -23,6 +23,30 @@ final class Uploader: NSObject, URLSessionDataDelegate {
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
+    private lazy var fast: URLSession = {
+        let config = URLSessionConfiguration.ephemeral      // small question clips: at once, mobile data permitted
+        config.timeoutIntervalForRequest = 30
+        return URLSession(configuration: config)
+    }()
+
+    /// Sends one small file at once. If this fails, the file goes to the outbox and takes the usual way.
+    func sendNow(_ file: URL) {
+        let name = file.lastPathComponent
+        let fallback = { try? FileManager.default.moveItem(at: file, to: Paths.outbox.appendingPathComponent(name)); self.kick() }
+        guard let url = Settings.url(name), let data = try? Data(contentsOf: file) else { _ = fallback(); return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue(Uploader.hex(SHA256.hash(data: data)), forHTTPHeaderField: "X-Sha256")
+        fast.uploadTask(with: request, from: data) { _, response, error in
+            if error == nil, (response as? HTTPURLResponse)?.statusCode == 200 {
+                try? FileManager.default.removeItem(at: file)
+            } else {
+                Log.write("question: fast upload failed, usual way")
+                _ = fallback()
+            }
+        }.resume()
+    }
+
     static func outboxFiles() -> [URL] {
         let list = (try? FileManager.default.contentsOfDirectory(at: Paths.outbox, includingPropertiesForKeys: nil)) ?? []
         return list.filter { $0.pathExtension == "bin" || $0.pathExtension == "ringraw" }
