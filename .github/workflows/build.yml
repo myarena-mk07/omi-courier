@@ -1,0 +1,39 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: brew install xcodegen
+      - name: Private config
+        env:
+          COURIER_BASE_URL: ${{ secrets.COURIER_BASE_URL }}
+        run: |
+          test -n "$COURIER_BASE_URL"
+          printf 'enum Config {\n    static let baseURL = "%s"\n}\n' "$COURIER_BASE_URL" > Sources/Config.swift
+      - name: Project
+        run: xcodegen generate
+      - name: Build (no signature; the phone signs it)
+        run: |
+          set -o pipefail
+          xcodebuild -project OmiCourier.xcodeproj -scheme OmiCourier -sdk iphoneos -configuration Release \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build \
+            | grep -E "error|warning: unre|BUILD|\.swift:[0-9]+:[0-9]+: error" || true
+          test -d build/Build/Products/Release-iphoneos/OmiCourier.app
+      - name: Package
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/OmiCourier.app Payload/
+          zip -qry OmiCourier.ipa Payload
+          ls -la OmiCourier.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OmiCourier-ipa
+          path: OmiCourier.ipa
+          retention-days: 30

@@ -1,0 +1,7 @@
+Sources/Config.swift
+*.xcodeproj
+Info.plist
+build/
+Payload/
+*.ipa
+.DS_Store

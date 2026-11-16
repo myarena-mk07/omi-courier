@@ -1,0 +1,4 @@
+// The build robot writes Sources/Config.swift from two repository secrets. Do not commit the real file.
+enum Config {
+    static let baseURL = "https://HOST/omi-audio/up/SECRET"   // upload door on the Mac mini
+}
