@@ -210,7 +210,13 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         } else if characteristic.uuid == Pendant.button {
             // 8 bytes; the first number is the event: 1 tap, 2 double tap, 3 long, 4 press, 5 release
             if let event = value.first {
-                if event == 2 { startQuestion() } else if event == 1, askStart != nil { endQuestion() }
+                // While a question runs, each tap ends it. The pendant can report one tap as a double tap,
+                // and a second "start" must never throw away the words that were spoken before it.
+                if let start = askStart {
+                    if (event == 1 || event == 2), Date().timeIntervalSince(start) > 1.5 { endQuestion() }
+                } else if event == 2 {
+                    startQuestion()
+                }
             }
         } else if characteristic.uuid == Pendant.storageStatus {
             // 16 bytes, four little-endian numbers: used bytes, unread records, free bytes, clock valid
