@@ -47,15 +47,20 @@ final class Uploader: NSObject, URLSessionDataDelegate {
         }.resume()
     }
 
-    /// Asks the Mac mini if the answer to a question clip is in Telegram.
-    func answerReady(_ clip: String, completion: @escaping (Bool) -> Void) {
-        guard let url = Settings.url("_answer?clip=" + clip) else { completion(false); return }
-        fast.dataTask(with: url) { data, _, _ in
-            var ready = false
-            if let data = data, let object = try? JSONSerialization.jsonObject(with: data), let json = object as? [String: Any] {
-                ready = (json["ready"] as? Bool) == true
-            }
-            completion(ready)
+    private lazy var quick: URLSession = {
+        let config = URLSessionConfiguration.ephemeral      // signal requests: small, with a short time limit
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 8
+        return URLSession(configuration: config)
+    }()
+
+    /// Asks the Mac mini for signals: answers that are ready, a test vibration, the vibration signs.
+    func signal(_ query: String, completion: @escaping ([String: Any]?) -> Void) {
+        guard let url = Settings.url("_signal?" + query) else { completion(nil); return }
+        quick.dataTask(with: url) { data, _, _ in
+            var reply: [String: Any]?
+            if let data = data, let object = try? JSONSerialization.jsonObject(with: data) { reply = object as? [String: Any] }
+            completion(reply)
         }.resume()
     }
 

@@ -46,13 +46,33 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var askFrames: [Data] = []
     private var askStart: Date?
     private let askMaxSeconds: TimeInterval = 120
-    // Vibration signs (the pendant knows 3 lengths: 1 = 0.1 s, 2 = 0.3 s, 3 = 0.5 s)
-    private let signStart: [UInt8] = [3]             // one long: speak now
-    private let signEnd: [UInt8] = [1, 1]            // two short: question sent
-    private let signAnswer: [UInt8] = [2, 2, 2]      // three medium: the answer is in Telegram
+    // Vibration signs. One step is [pulse, time to the start of the next pulse in ms]. The pendant knows the
+    // pulses 1, 2 and 3 (short, medium, long). The Mac mini can send other signs, so a change needs no new app.
+    private static let defaultSigns: [String: [[Int]]] = [
+        "start": [[3, 0]],                           // one long: speak now
+        "end": [[3, 750], [3, 0]],                   // two long: question sent
+        "answer": [[3, 750], [3, 750], [3, 0]],      // three long: the answer is in Telegram
+    ]
+    private var signs = Pendant.loadSigns()
     private var waiting: [String: Date] = [:]        // question clips that wait for an answer
-    private var lastAnswerCheck = Date.distantPast
-    var answerReady: ((String, @escaping (Bool) -> Void) -> Void)?
+    private var listenUntil = Date.distantPast       // the app asks the Mac mini for signals until this time
+    private var lastPoll = Date.distantPast
+    private var lastWake = Date.distantPast
+    private var pollBusy = false
+    private var lastTestID: Int64 = 0
+    private var playedReport: String?
+    private var buzzFreeAt = Date.distantPast
+    private var hapticConfirmed = 0
+    private var hapticFailed = 0
+    var signal: ((String, @escaping ([String: Any]?) -> Void) -> Void)?
+
+    private static func loadSigns() -> [String: [[Int]]] {
+        var result = defaultSigns
+        for (name, value) in UserDefaults.standard.dictionary(forKey: "signs") ?? [:] {
+            if let steps = value as? [[Int]], !steps.isEmpty { result[name] = steps }
+        }
+        return result
+    }
 
     init(status: Status) {
         self.status = status
@@ -67,7 +87,10 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             guard let self = self, let pendant = self.peripheral, let control = self.storage else { return }
             pendant.writeValue(command, for: control, type: .withResponse)
         }
-        queue.sync { SegmentWriter.recoverLeftovers() }
+        queue.sync {
+            SegmentWriter.recoverLeftovers()
+            listenUntil = Date().addingTimeInterval(600)
+        }
         central = CBCentralManager(delegate: self, queue: queue, options: [
             CBCentralManagerOptionRestoreIdentifierKey: "omi-courier-central",
             CBCentralManagerOptionShowPowerAlertKey: false,
@@ -204,7 +227,14 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
+    func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        poll()                                   // the read keeps the app awake while it waits for an answer
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if characteristic.uuid == Pendant.haptic {
+            if error == nil { hapticConfirmed += 1 } else { hapticFailed += 1 }
+        }
         if let error = error { Log.write("write to \(characteristic.uuid.uuidString.prefix(8)) failed: \(error.localizedDescription)") }
     }
 
@@ -217,6 +247,7 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         } else if characteristic.uuid == Pendant.button {
             // 8 bytes; the first number is the event: 1 tap, 2 double tap, 3 long, 4 press, 5 release
             if let event = value.first {
+                listenUntil = Date().addingTimeInterval(600)
                 // While a question runs, each tap ends it. The pendant can report one tap as a double tap,
                 // and a second "start" must never throw away the words that were spoken before it.
                 if let start = askStart {
@@ -286,38 +317,96 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
-    private func buzz(_ pattern: [UInt8]) {
-        var delay = 0.0
-        for length in pattern {
-            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+    /// Plays a vibration sign. Each pulse is one write to the pendant, and the pendant confirms each write.
+    /// The result goes into the log and to the Mac mini.
+    private func play(_ name: String, steps given: [[Int]]? = nil) {
+        let steps = given ?? signs[name] ?? Pendant.defaultSigns[name] ?? []
+        guard let pendant = peripheral, hapticItem != nil, pendant.state == .connected else {
+            Log.write("vibration \(name): no link to the pendant")
+            playedReport = "\(name).0.0.0"
+            return
+        }
+        let now = Date()
+        var at = max(0, buzzFreeAt.timeIntervalSince(now))          // do not mix two signs
+        var pulses = 0
+        hapticConfirmed = 0
+        hapticFailed = 0
+        for step in steps.prefix(12) {
+            guard let pulse = step.first, (1...3).contains(pulse) else { continue }
+            queue.asyncAfter(deadline: .now() + at) { [weak self] in
                 guard let self = self, let pendant = self.peripheral, let item = self.hapticItem else { return }
-                pendant.writeValue(Data([length]), for: item, type: .withResponse)
+                pendant.writeValue(Data([UInt8(pulse)]), for: item, type: .withResponse)
             }
-            delay += [0.0, 0.35, 0.6, 0.8][Int(min(length, 3))]     // the pulse plus a pause
+            pulses += 1
+            let least = [0, 250, 450, 650][pulse]                   // the pulse plus a clear pause
+            at += Double(max(step.count > 1 ? step[1] : 0, least)) / 1000
+        }
+        buzzFreeAt = now.addingTimeInterval(at + 0.4)
+        queue.asyncAfter(deadline: .now() + at + 0.8) { [weak self] in
+            guard let self = self else { return }
+            Log.write("vibration \(name): \(pulses) pulses, \(self.hapticConfirmed) confirmed, \(self.hapticFailed) failed")
+            self.playedReport = "\(name).\(pulses).\(self.hapticConfirmed).\(self.hapticFailed)"
         }
     }
 
-    private func checkAnswers() {
+    /// While a question waits for its answer, and for 10 minutes after a button event or an app start, the app
+    /// asks the Mac mini each 3 seconds: is an answer ready, is there a test vibration, are there other signs?
+    private func poll() {
         let now = Date()
-        waiting = waiting.filter { now.timeIntervalSince($0.value) < 900 }
-        guard !waiting.isEmpty, now.timeIntervalSince(lastAnswerCheck) > 3 else { return }
-        lastAnswerCheck = now
-        for name in waiting.keys {
-            answerReady?(name) { [weak self] ready in
-                guard ready else { return }
-                self?.queue.async {
-                    guard let self = self, self.waiting.removeValue(forKey: name) != nil else { return }
-                    self.buzz(self.signAnswer)
-                    Log.write("question: answer is ready")
-                }
+        waiting = waiting.filter { now.timeIntervalSince($0.value) < 1500 }
+        guard !waiting.isEmpty || now < listenUntil else { return }
+        // In a quiet room the pendant sends nothing, and iOS then lets the app sleep. A small read each
+        // 2 seconds keeps the app awake, so it can see the answer and can make the pendant vibrate.
+        if now.timeIntervalSince(lastWake) >= 2, let pendant = peripheral, pendant.state == .connected {
+            lastWake = now
+            pendant.readRSSI()
+        }
+        guard now.timeIntervalSince(lastPoll) >= (pollBusy ? 10 : 3) else { return }
+        lastPoll = now
+        pollBusy = true
+        let report = playedReport
+        var query = "clips=" + waiting.keys.sorted().joined(separator: ",") + "&after=\(lastTestID)"
+        if let report = report { query += "&played=" + report }
+        signal?(query) { [weak self] reply in
+            self?.queue.async {
+                guard let self = self else { return }
+                self.pollBusy = false
+                guard let reply = reply else { return }
+                if report != nil, self.playedReport == report { self.playedReport = nil }
+                self.handle(reply)
             }
+        }
+    }
+
+    private func handle(_ reply: [String: Any]) {
+        var changed = false
+        for (name, value) in reply["signs"] as? [String: Any] ?? [:] {
+            if let steps = value as? [[Int]], !steps.isEmpty, signs[name] != steps {
+                signs[name] = steps
+                changed = true
+            }
+        }
+        if changed {
+            UserDefaults.standard.set(signs, forKey: "signs")
+            Log.write("vibration signs changed")
+        }
+        var answered = false
+        for name in reply["ready"] as? [String] ?? [] where waiting.removeValue(forKey: name) != nil { answered = true }
+        if answered {
+            Log.write("question: answer is ready")
+            play("answer")
+        }
+        if let test = reply["test"] as? [String: Any], let id = (test["id"] as? NSNumber)?.int64Value, id > lastTestID,
+           let steps = test["pattern"] as? [[Int]] {
+            lastTestID = id
+            play("t\(id)", steps: steps)
         }
     }
 
     private func startQuestion() {
         askFrames = []
         askStart = Date()
-        buzz(signStart)
+        play("start")
         Log.write("question: start")
     }
 
@@ -342,7 +431,7 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         do {
             try body.write(to: file)
             Log.write("question: \(frames.count / 50) s")
-            buzz(signEnd)
+            play("end")
             waiting[name] = Date()
             onQuestion?(file)
         } catch {
@@ -355,7 +444,7 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         if idle > 0.5 { flushFrame() }
         if idle > 3 { writer.close() }       // close the file, so that the upload can start
         if let start = askStart, Date().timeIntervalSince(start) > askMaxSeconds { endQuestion() }
-        checkAnswers()
+        poll()
         ring.tick()
     }
 }
