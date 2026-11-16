@@ -10,6 +10,10 @@ import Foundation
 ///   send [0x12][next u64]            -> ACK   [0x01][status]   (the pendant can free the records)
 ///   send [0x03]                      -> stop a read
 /// One record is 444 bytes. Files are cut at a whole number of records.
+///
+/// The Omi app can be connected to the same pendant on the same iPhone at the same time. iOS gives each
+/// notification to both apps. So when the Omi app starts a read, this class stores that data too ("passive").
+/// It does not release anything in that case; the Omi app does that for its own read.
 /// Use from the Bluetooth queue only.
 final class RingDrain {
     private enum Phase { case idle, waitInfo, reading, waitAdvance }
@@ -29,6 +33,7 @@ final class RingDrain {
     private var partURL: URL?
     private var lastEvent = Date.distantPast
     private var infoTries = 0
+    private var passive = false
 
     var isBusy: Bool { phase != .idle }
 
@@ -45,8 +50,24 @@ final class RingDrain {
         lastEvent = Date()
         switch kind {
         case 0x02: info(value)
-        case 0x03: if phase == .reading { store(value.dropFirst()) }
-        case 0x04: if phase == .reading { done(value) }
+        case 0x03:
+            if phase != .reading && !passive {      // another app started this read: keep a copy
+                passive = true
+                totalBytes = 0
+                partBytes = 0
+                part = 0
+                stamp = Int(Date().timeIntervalSince1970)
+                Log.write("ring: data from a read of another app. Passive copy starts.")
+            }
+            store(value.dropFirst())
+        case 0x04:
+            if phase == .reading {
+                done(value)
+            } else if passive {
+                closePart()
+                passive = false
+                Log.write("ring: passive copy ended, \(totalBytes / recordBytes) records")
+            }
         case 0x01: answer(value)
         default: break
         }
@@ -70,13 +91,17 @@ final class RingDrain {
         case .waitAdvance:
             if idle > 5 { phase = .idle }
         case .idle:
-            break
+            if passive && idle > 15 {
+                closePart()
+                passive = false
+            }
         }
     }
 
     func linkLost() {
         closePart()
         phase = .idle
+        passive = false
         infoTries = 0
     }
 
@@ -99,6 +124,10 @@ final class RingDrain {
         guard write > read else {
             phase = .idle
             return
+        }
+        if passive {            // do not mix two reads in one file
+            closePart()
+            passive = false
         }
         startSeq = read
         totalBytes = 0
@@ -165,7 +194,9 @@ final class RingDrain {
     }
 
     private func openPart() {
-        let name = String(format: "ring_%@_%d_%llu_rtc%d_p%04d.ringraw", deviceTag, stamp, startSeq, clockValid ? 1 : 0, part)
+        let name = passive
+            ? String(format: "ringp_%@_%d_rtc%d_p%04d.ringraw", deviceTag, stamp, clockValid ? 1 : 0, part)
+            : String(format: "ring_%@_%d_%llu_rtc%d_p%04d.ringraw", deviceTag, stamp, startSeq, clockValid ? 1 : 0, part)
         let file = Paths.recording.appendingPathComponent(name)
         FileManager.default.createFile(
             atPath: file.path, contents: nil,
