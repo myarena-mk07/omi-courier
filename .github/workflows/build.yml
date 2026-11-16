@@ -2,10 +2,14 @@ name: build
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: GitHub runner image
+        default: macos-15
 jobs:
   ipa:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
