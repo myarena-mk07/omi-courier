@@ -45,7 +45,14 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var hapticItem: CBCharacteristic?
     private var askFrames: [Data] = []
     private var askStart: Date?
-    private let askMaxSeconds: TimeInterval = 20
+    private let askMaxSeconds: TimeInterval = 120
+    // Vibration signs (the pendant knows 3 lengths: 1 = 0.1 s, 2 = 0.3 s, 3 = 0.5 s)
+    private let signStart: [UInt8] = [3]             // one long: speak now
+    private let signEnd: [UInt8] = [1, 1]            // two short: question sent
+    private let signAnswer: [UInt8] = [2, 2, 2]      // three medium: the answer is in Telegram
+    private var waiting: [String: Date] = [:]        // question clips that wait for an answer
+    private var lastAnswerCheck = Date.distantPast
+    var answerReady: ((String, @escaping (Bool) -> Void) -> Void)?
 
     init(status: Status) {
         self.status = status
@@ -279,15 +286,38 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
-    private func buzz() {
-        guard let pendant = peripheral, let item = hapticItem else { return }
-        pendant.writeValue(Data([1]), for: item, type: .withResponse)      // 100 ms
+    private func buzz(_ pattern: [UInt8]) {
+        var delay = 0.0
+        for length in pattern {
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self, let pendant = self.peripheral, let item = self.hapticItem else { return }
+                pendant.writeValue(Data([length]), for: item, type: .withResponse)
+            }
+            delay += [0.0, 0.35, 0.6, 0.8][Int(min(length, 3))]     // the pulse plus a pause
+        }
+    }
+
+    private func checkAnswers() {
+        let now = Date()
+        waiting = waiting.filter { now.timeIntervalSince($0.value) < 900 }
+        guard !waiting.isEmpty, now.timeIntervalSince(lastAnswerCheck) > 3 else { return }
+        lastAnswerCheck = now
+        for name in waiting.keys {
+            answerReady?(name) { [weak self] ready in
+                guard ready else { return }
+                self?.queue.async {
+                    guard let self = self, self.waiting.removeValue(forKey: name) != nil else { return }
+                    self.buzz(self.signAnswer)
+                    Log.write("question: answer is ready")
+                }
+            }
+        }
     }
 
     private func startQuestion() {
         askFrames = []
         askStart = Date()
-        buzz()
+        buzz(signStart)
         Log.write("question: start")
     }
 
@@ -312,7 +342,8 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         do {
             try body.write(to: file)
             Log.write("question: \(frames.count / 50) s")
-            buzz()
+            buzz(signEnd)
+            waiting[name] = Date()
             onQuestion?(file)
         } catch {
             Log.write("question: cannot write the clip")
@@ -324,6 +355,7 @@ final class Pendant: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         if idle > 0.5 { flushFrame() }
         if idle > 3 { writer.close() }       // close the file, so that the upload can start
         if let start = askStart, Date().timeIntervalSince(start) > askMaxSeconds { endQuestion() }
+        checkAnswers()
         ring.tick()
     }
 }

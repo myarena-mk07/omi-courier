@@ -47,6 +47,18 @@ final class Uploader: NSObject, URLSessionDataDelegate {
         }.resume()
     }
 
+    /// Asks the Mac mini if the answer to a question clip is in Telegram.
+    func answerReady(_ clip: String, completion: @escaping (Bool) -> Void) {
+        guard let url = Settings.url("_answer?clip=" + clip) else { completion(false); return }
+        fast.dataTask(with: url) { data, _, _ in
+            var ready = false
+            if let data = data, let object = try? JSONSerialization.jsonObject(with: data), let json = object as? [String: Any] {
+                ready = (json["ready"] as? Bool) == true
+            }
+            completion(ready)
+        }.resume()
+    }
+
     static func outboxFiles() -> [URL] {
         let list = (try? FileManager.default.contentsOfDirectory(at: Paths.outbox, includingPropertiesForKeys: nil)) ?? []
         return list.filter { $0.pathExtension == "bin" || $0.pathExtension == "ringraw" }
