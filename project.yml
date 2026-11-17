@@ -14,8 +14,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: Omi Courier
-        CFBundleShortVersionString: "0.2.3"
-        CFBundleVersion: "8"
+        CFBundleShortVersionString: "0.2.4"
+        CFBundleVersion: "9"
         UIBackgroundModes: [bluetooth-central]
         NSBluetoothAlwaysUsageDescription: The app reads the audio from your Omi pendant.
         UIFileSharingEnabled: true
