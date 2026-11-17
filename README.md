@@ -6,7 +6,9 @@ SHA-256 checksum.
 
 - `Sources/Pendant.swift` Bluetooth link and audio packets
 - `Sources/SegmentWriter.swift` audio files (`[UInt32 length][Opus packet]`, one run of audio for each file)
-- `Sources/Uploader.swift` upload on Wi-Fi with a background session
+- `Sources/Uploader.swift` upload on Wi-Fi. The app sends each file itself while it runs: one serial queue, one upload
+  for each file, two files in parallel. (Up to build 8 a background session of iOS did this. iOS held the uploads for
+  hours, and one file got many upload tasks.)
 - `Sources/Heartbeat.swift` status message to the server
 - `.github/workflows/build.yml` makes an unsigned `.ipa`. The phone signs it at install.
 
